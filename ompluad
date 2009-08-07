@@ -8,6 +8,7 @@ Omp = {
     verbose = true,
     options = {},
     files = {},
+    file = "",
     tmpfilename = "ompluad.tmp",
 }
 local function getOptions(tbl)
@@ -110,7 +111,7 @@ local function post(tbl, filename)
             sent = sent + #(data or "")
             local progress = sent/(size + #bb + #be) * 100;
             local hashes = string.rep("#", progress/2)
-            io.write(string.format("Uploading %s: %d%%\n%s\27[1A\r", filename, progress, hashes))
+            io.write(string.format("Uploading %s: %d%%\n%s\27[1A\r", tbl.file, progress, hashes))
         end
         return data
     end
@@ -184,6 +185,7 @@ local function postAll(tbl)
         local tmpfile = io.open(tbl.tmpfilename, "w")
         tmpfile:write(buf)
         tmpfile:close()
+        tbl.file = "stdin"
         if tbl.verbose then
             print("\n"..post(tbl, tbl.tmpfilename))
         else
