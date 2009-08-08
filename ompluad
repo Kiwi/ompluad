@@ -9,43 +9,64 @@ Omp = {
     options = {},
     files = {},
     file = "",
+    stdin = "",
     tmpfilename = "ompluad.tmp",
 }
 local function getOptions(tbl)
-  local function resetFlags()
-    for k in pairs(tbl.options) do
-      tbl.options[k].on = false
-    end
-  end
-  local cur_opt
-  local args_left = #arg
-  for i = 1, #arg do
-    if string.match(arg[i], "^%-%-") then
-      s = string.gsub(arg[i], "^%-%-", "")
-      if tbl.options[s] and #s > 1 then
-        tbl.options[s].on = true
-        cur_opt = s
-      else
-        print("--"..s.." is an invalid option")
-        resetFlags()
-      end
-    elseif string.match(arg[i], "^%-%a+") then
-      for j = 1, #arg[i]-1 do
-        s = string.sub(arg[i], j+1, j+1)
-        if tbl.options[s] then
-          tbl.options[s].on = true
-          cur_opt = s
-        else
-          print("-"..s.." is an invalid option")
-          resetFlags()
+    local function resetFlags()
+        for k in pairs(tbl.options) do
+            tbl.options[k].on = false
         end
-      end
-    elseif cur_opt then 
-      table.insert(tbl.options[cur_opt].params, arg[i])
-    else
-      table.insert(tbl.files, arg[i])
     end
-  end
+    local cur_opt, last_opt, last_argsg
+    local argsg = 0
+    for i = 1, #arg do
+        if string.match(arg[i], "^%-%-") then
+            s = string.gsub(arg[i], "^%-%-", "")
+            if tbl.options[s] and #s > 1 then
+                tbl.options[s].on = true
+                    last_argsg = argsg
+                    argsg = 0
+                    last_opt = cur_opt or s
+                    cur_opt = s
+            else
+                print("--"..s.." is an invalid option")
+                resetFlags()
+                return
+            end
+        elseif string.match(arg[i], "^%-%a+") then
+            for j = 1, #arg[i]-1 do
+                s = string.sub(arg[i], j+1, j+1)
+                if tbl.options[s] then
+                    tbl.options[s].on = true
+                        last_argsg = argsg
+                        argsg = 0
+                        last_opt = cur_opt or s
+                        cur_opt = s
+                else
+                    print("-"..s.." is an invalid option")
+                    resetFlags()
+                    return
+                end
+            end
+        elseif cur_opt then
+            if tbl.options[cur_opt].numargs ~= nil and tbl.options[cur_opt].numargs > argsg then
+                table.insert(tbl.options[cur_opt].params, arg[i])
+                argsg = argsg+1
+            elseif tbl.options[cur_opt].numargs == nil then
+                table.insert(tbl.options[cur_opt].params, arg[i])
+            else
+                table.insert(tbl.files, arg[i])
+            end
+        else
+            table.insert(tbl.files, arg[i])
+        end 
+    end
+    if last_opt and tbl.options[last_opt].numargs ~= nil and tbl.options[last_opt].numargs ~= last_argsg then
+        print("Too few args for "..last_opt)
+        resetFlags()
+        return
+    end
 end
 
 local function setOptions(tbl)
@@ -56,10 +77,10 @@ local function setOptions(tbl)
     end
 end
 
-local function addOption(tbl, option_name, func_name, secondary_name)
-  tbl.options[option_name] = {on = false, params = {}, func = func_name}
+local function addOption(tbl, num_args, option_name, func_name, secondary_name)
+  tbl.options[option_name] = {on = false, params = {}, func = func_name, numargs = num_args}
   if secondary_name and secondary_name ~= option_name then
-    tbl.options[secondary_name] = {on = false, params = tbl.options[option_name].params, func = func_name}
+    tbl.options[secondary_name] = {on = false, params = tbl.options[option_name].params, func = func_name, numargs = num_args}
   end
 end
 
@@ -73,7 +94,7 @@ local function post(tbl, filename)
     
     local bb = {
         '--'..boundary,
-        string.format('Content-Disposition: form-data; name="file1"; filename="%s"', filename),
+        string.format('Content-Disposition: form-data; name="file1"; filename="%s"', tbl.file),
         'Content-Type: application/octet-stream',
         '',
         '',
@@ -88,7 +109,7 @@ local function post(tbl, filename)
     be = table.concat(be, "\r\n")
     local size = file:seek("end")
     if size > 2^28 then 
-        print("Error ompluading "..filename..": file exceeds ".. 2^28 .." bytes (size was " .. size ..")")
+        print("Error ompluading "..tbl.file..": file exceeds ".. 2^28 .." bytes (size was " .. size ..")")
         os.exit()
     end
     file:seek("set")
@@ -143,8 +164,10 @@ end
 
 local function help(tbl)
     print([=[
-Usage: ompluad [-h|--help] [file(s)] [options]
+Usage: ompluad [-h|--help] [options] [file(s)]
     -u, --url       Only output URL when finished
+    -f, --filename  Filename to use when posting data
+                    from stdin
 
     You can supply a list of files OR data via stdin
 ]=])
@@ -154,6 +177,16 @@ end
 
 local function urlonly(tbl)
     tbl.verbose = false
+end
+
+local function stdindescrip(tbl, params)
+    if params[1] then
+        tbl.stdin = params[1]
+    else
+        print("Usage: ompluad -f DESCRIPTION")
+        cleanup(tbl)
+        os.exit()
+    end
 end
 
 local function fdata(tbl, file)
@@ -185,9 +218,9 @@ local function postAll(tbl)
         local tmpfile = io.open(tbl.tmpfilename, "w")
         tmpfile:write(buf)
         tmpfile:close()
-        tbl.file = "stdin"
+        tbl.file = tbl.stdin or "stdin"
         if tbl.verbose then
-            print("\n"..post(tbl, tbl.tmpfilename))
+            print("\n\n"..post(tbl, tbl.tmpfilename))
         else
             print(post(tbl, tbl.tmpfilename))
         end
@@ -196,8 +229,9 @@ end
 
 
 
-addOption(Omp, "h", help, "help")
-addOption(Omp, "u", urlonly, "url")
+addOption(Omp, 0, "h", help, "help")
+addOption(Omp, 0, "u", urlonly, "url")
+addOption(Omp, 1, "f", stdindescrip, "filename")
 getOptions(Omp)
 setOptions(Omp)
 postAll(Omp)
