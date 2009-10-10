@@ -1,6 +1,5 @@
 #!/usr/bin/lua
 local socket = require ("socket")
-local ftp = require("socket.ftp")
 local http = require "socket.http"
 local ltn12 = require "ltn12"
 
@@ -10,62 +9,55 @@ Omp = {
     files = {},
     file = "",
     stdin = "",
-    tmpfilename = "ompluad.tmp",
+    maxsize = 2^30,
+    tmpfilename = "/tmp/ompluad.tmp",
 }
-local function getOptions(tbl)
+
+local function getOptions(options)
     local function resetFlags()
-        for k in pairs(tbl.options) do
-            tbl.options[k].on = false
+        for k in pairs(options) do
+            options[k].on = false
         end
     end
-    local cur_opt, last_opt, last_argsg
-    local argsg = 0
+
+    local cur_opt, required_opt
+
     for i = 1, #arg do
         if string.match(arg[i], "^%-%-") then
             s = string.gsub(arg[i], "^%-%-", "")
-            if tbl.options[s] and #s > 1 then
-                tbl.options[s].on = true
-                    last_argsg = argsg
-                    argsg = 0
-                    last_opt = cur_opt or s
-                    cur_opt = s
+            if options[s] and #s > 1 then
+                options[s].on = true
+                cur_opt = s
+                required_opt = options[s].required
             else
                 print("--"..s.." is an invalid option")
                 resetFlags()
-                return
             end
+
         elseif string.match(arg[i], "^%-%a+") then
             for j = 1, #arg[i]-1 do
                 s = string.sub(arg[i], j+1, j+1)
-                if tbl.options[s] then
-                    tbl.options[s].on = true
-                        last_argsg = argsg
-                        argsg = 0
-                        last_opt = cur_opt or s
-                        cur_opt = s
+                if options[s] then
+                    options[s].on = true
+                    cur_opt = s
+                    required_opt = options[s].required
                 else
                     print("-"..s.." is an invalid option")
                     resetFlags()
-                    return
                 end
             end
+
         elseif cur_opt then
-            if tbl.options[cur_opt].numargs ~= nil and tbl.options[cur_opt].numargs > argsg then
-                table.insert(tbl.options[cur_opt].params, arg[i])
-                argsg = argsg+1
-            elseif tbl.options[cur_opt].numargs == nil then
-                table.insert(tbl.options[cur_opt].params, arg[i])
+            if required_opt then
+                table.insert(options[cur_opt].params, arg[i])
+                cur_opt = nil
+                required_opt = false
             else
-                table.insert(tbl.files, arg[i])
+                table.insert(Omp.files, arg[i])
             end
         else
-            table.insert(tbl.files, arg[i])
-        end 
-    end
-    if last_opt and tbl.options[last_opt].numargs ~= nil and tbl.options[last_opt].numargs ~= last_argsg then
-        print("Too few args for "..last_opt)
-        resetFlags()
-        return
+            table.insert(Omp.files, arg[i])
+        end
     end
 end
 
@@ -77,21 +69,21 @@ local function setOptions(tbl)
     end
 end
 
-local function addOption(tbl, num_args, option_name, func_name, secondary_name)
-  tbl.options[option_name] = {on = false, params = {}, func = func_name, numargs = num_args}
-  if secondary_name and secondary_name ~= option_name then
-    tbl.options[secondary_name] = {on = false, params = tbl.options[option_name].params, func = func_name, numargs = num_args}
-  end
+local function addOption(tbl, required_opt, option_name, func_name, secondary_name)
+    tbl.options[option_name] = {on = false, params = {}, func = func_name, required = required_opt}
+
+    if secondary_name and secondary_name ~= option_name then
+        tbl.options[secondary_name] = {on = false, params = tbl.options[option_name].params, func = func_name, required = required_opt}
+    end
 end
 
 local function cleanup(tbl)
     os.remove(tbl.tmpfilename)
 end
 
-
 local function post(tbl, filename)
     local boundary = "##ThIs_iS_ThE_BoUnDaRy##"
-    
+
     local bb = {
         '--'..boundary,
         string.format('Content-Disposition: form-data; name="file1"; filename="%s"', tbl.file),
@@ -99,66 +91,75 @@ local function post(tbl, filename)
         '',
         '',
     }
+
     local be = {
-        '', 
+        '',
         '--'..boundary..'--',
         ''
     }
-    local file = assert(io.open(filename, "rb"))
+
     bb = table.concat(bb, "\r\n")
     be = table.concat(be, "\r\n")
+
+    local file = assert(io.open(filename, "rb"))
     local size = file:seek("end")
-    if size > 2^28 then 
-        print("Error ompluading "..tbl.file..": file exceeds ".. 2^28 .." bytes (size was " .. size ..")")
+
+    if size > tbl.maxsize then
+        print("Error ompluading " .. tbl.file .. ": file exceeds " .. tbl.maxsize / 2^20 .. " megabytes (size was " .. string.format("%.2f", tonumber(size / 2^20)) .. " megabytes)")
+        cleanup(tbl)
         os.exit()
     end
+
     file:seek("set")
+
     local head = {
         ["content-type"] = string.format('multipart/form-data; boundary=%s', boundary);
         ["content-length"] = tostring(size + #bb + #be);
         ["accept"] = "text/xml";
     }
-    
-    local response = {}
+
     local http_source = ltn12.source.cat(
         ltn12.source.string(bb),
         ltn12.source.file(file),
         ltn12.source.string(be))
-    local sent = 0
-    
+
+    local response, sent = {}, 0
+
     local function progress()
         local data = http_source()
         if tbl.verbose then
             sent = sent + #(data or "")
-            local progress = sent/(size + #bb + #be) * 100;
+            local progress = sent / (size + #bb + #be) * 100;
             local hashes = string.rep("#", progress/2)
-            io.write(string.format("Uploading %s: %d%%\n%s\27[1A\r", tbl.file, progress, hashes))
+            local endpipe = string.rep(" ", 50 - #hashes ).."|"
+            io.write(string.format("Uploading %s: %d%%\n%s%s\27[1A\r", tbl.file, progress, hashes, endpipe))
         end
+
         return data
     end
-    local r,e = http.request {
+
+    local r, e = http.request {
         method = "POST";
         url = "http://omploader.org/upload";
         headers = head;
         source = progress;
         sink = ltn12.sink.table(response);
     }
-    
---    print()
 
     if not r then
         return nil,tostring(e)
     end
-    
+
     response = table.concat(response)
+
     local err = response:match('<err%s+type="(.*)"/>')
+
     if err then
-        return nil,err
+        return nil, err
     end
-    
+
     local url = response:match('View file: <a href="%w*">(http://omploader.org/%w*)</a>')
-    --local url = response
-    --return response
+
     return url
 end
 
@@ -171,8 +172,9 @@ Usage: ompluad [-h|--help] [options] [file(s)]
 
     You can supply a list of files OR data via stdin
 ]=])
-cleanup(tbl)
-os.exit()
+
+    cleanup(tbl)
+    os.exit()
 end
 
 local function urlonly(tbl)
@@ -189,36 +191,41 @@ local function stdindescrip(tbl, params)
     end
 end
 
-local function fdata(tbl, file)
-    local fd = assert(io.open(file, "rb"))
-    local buf = fd:read("*a")
-    fd:close()
-    local tmpfile = io.open(tbl.tmpfilename, "w")
-    tmpfile:write(buf)
-    tmpfile:close()
-    tbl.file = file
-end
-
 local function postAll(tbl)
     if #tbl.files > 0 then
         for k, v in ipairs(tbl.files) do
-            fdata(tbl, v)
+            tbl.file = v
             if tbl.verbose then
-                print("\n\n"..post(tbl, tbl.tmpfilename))
+                print("\n\n"..post(tbl, v))
             else
-                print(post(tbl, tbl.tmpfilename))
+                print(post(tbl, v))
             end
             if k < #tbl.files then
                 os.execute("sleep 5")
             end
         end
-    elseif
-        #tbl.files == 0 then
-        local buf = io.stdin:read("*a")
+
+    elseif  #tbl.files == 0 then
+        local size = 0
         local tmpfile = io.open(tbl.tmpfilename, "w")
-        tmpfile:write(buf)
+
+        while true do
+            local block = io.stdin:read(2^12)
+            size = size + 2^12
+            if not block then break end
+            tmpfile:write(block)
+        end
+
         tmpfile:close()
+
+        if size > tbl.maxsize then
+            print("Error ompluading from stdin: input exceeds " .. tbl.maxsize / 2^20 .. " megabytes (size was " .. string.format("%.2f", tonumber(size / 2^20)) .. " megabytes)")
+            cleanup(tbl)
+            os.exit()
+        end
+
         tbl.file = tbl.stdin or "stdin"
+
         if tbl.verbose then
             print("\n\n"..post(tbl, tbl.tmpfilename))
         else
@@ -227,12 +234,11 @@ local function postAll(tbl)
     end
 end
 
-
-
-addOption(Omp, 0, "h", help, "help")
-addOption(Omp, 0, "u", urlonly, "url")
-addOption(Omp, 1, "f", stdindescrip, "filename")
-getOptions(Omp)
+cleanup(Omp)
+addOption(Omp, false, "h", help, "help")
+addOption(Omp, false, "u", urlonly, "url")
+addOption(Omp, true, "f", stdindescrip, "filename")
+getOptions(Omp.options)
 setOptions(Omp)
 postAll(Omp)
 cleanup(Omp)
